@@ -1,0 +1,176 @@
+
+#####
+#Start: loading required packages
+library(devtools)
+library(rlang)
+library(tidyverse)
+library(RColorBrewer)
+library(pheatmap)
+library(ggplot2)
+library(ggrepel)
+# BiocManager::install("AnnotationDbi")
+library(AnnotationDbi)
+# BiocManager::install("org.Mm.eg.db")
+library(org.Mm.eg.db)
+library(ashr)
+library(readr)
+
+#Load Tximeta and Tximport
+# BiocManager::install("tximeta")
+# BiocManager::install("tximport")
+library(tximeta)
+library(tximport)
+#Load DESeq2
+# BiocManager::install("DESeq2")
+library(DESeq2)
+
+#Load rnaseqGene
+# BiocManager::install("rnaseqGene")
+library(rnaseqGene)
+
+#####
+#Section 1: Creating the dataframe for tximeta 
+
+#Creating a sample table 
+
+samples <- list.files(path = "data/salmon1", full.names = T, pattern = "quant")
+samples
+files <- file.path(samples, "quant.sf")
+files
+basenametemp <- tools::file_path_sans_ext(basename(samples))
+basename <- gsub(pattern = "\\_quant$", "", basenametemp)
+basename
+file.exists(files)
+
+#To add the conditions to your samples
+cond <- read.csv("data/muscle.csv", header = TRUE)
+view(cond)
+
+#To create a CSV table
+coldata <- data.frame(files, names = basename, condition = "", stringsAsFactors = FALSE)
+coldata
+
+#Add conditions to coldata column
+match_conditions <- match(coldata$names, cond$Samples)
+coldata$condition <- cond$Condition [match_conditions]
+coldata
+
+
+#Running Tximeta - you need to use to above code, for some reason if i just run the Tximeta on its own,
+#it wont link correctly 
+se <- tximeta(coldata)
+suppressPackageStartupMessages(library(SummarizedExperiment))
+colData(se)
+assayNames(se)
+rowRanges(se)
+seqinfo(se)
+edb <- retrieveDb(se)
+class(edb)
+se.exons <- addExons(se)
+rowRanges(se.exons)[[1]]
+gse <- summarizeToGene(se)
+rowRanges(gse)
+gse$condition
+
+#####
+#THE DESEQDATASEA
+#Building a DESeqDataSet and begin Differential expression analysis
+dds <- DESeqDataSet(gse, design = ~ condition)
+dds
+
+#This is essential for diagnostic plots - removes genes with a count less than 10
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+
+#You need to specify what your conditions are and level them appropriately 
+dds$condition <- relevel(dds$condition, ref = "SNMP")
+levels(dds$condition)
+
+# dds <- DESeqDataSet(gse, design = ~ condition)
+
+#now you run the DESeq analysis 
+dds <- DESeq(dds)
+
+resultsNames(dds)
+
+# results:
+res_1 <- results(dds, contrast = c("condition","MSMP","SNMP"), alpha = 0.05)
+res_1
+
+
+# # CHECKING BATCH EFFECT FIRST 
+rld <- rlog(dds)
+# 
+# # BiocManager::install("pcaExplorer")
+library("pcaExplorer")
+# 
+# # since we are using Gencode, we need to switch the gene version id to the gene id in order to use PCA Explorer. 
+# #Adding gene names 
+library(biomaRt)
+# 
+# #Need to use old mart version 102, otherwise my data wont match.
+ensembl102 <- useEnsembl(biomart = 'genes',
+                         dataset = 'mmusculus_gene_ensembl',
+                         version = 102)
+# 
+genemap <- getBM(attributes = c('ensembl_gene_id_version', 'ensembl_gene_id'),
+                 filters = 'ensembl_gene_id_version',
+                 values = dds@rowRanges$gene_id,
+                 mart = ensembl102)
+# 
+id_match <- match(dds@rowRanges$gene_id, genemap$ensembl_gene_id_version)
+# 
+dds@rowRanges$gene_id_new <- genemap$ensembl_gene_id [id_match]
+
+# # PCA EXplorere
+genenames <- mapIds(org.Mm.eg.db, keys = dds@rowRanges$gene_id_new, column = "SYMBOL", keytype = "ENSEMBL")
+annotation <- data.frame(gene_names = genenames, row.names = dds@rowRanges$gene_id_new, stringsAsFactors = FALSE)
+head(annotation)
+# 
+# #Relaunch PCAexplorer to compare the datasets
+pcaExplorer(dds = dds, dst = rld, annotation = annotation)
+
+#####
+#Annotations
+#Adding gene names 
+library(biomaRt)
+#Next we have to split up the rownames of the results object 
+res_1$ensembl_version <- sapply(strsplit(rownames(res_1), split="\\+"), "[",1)
+head(res_1,4)
+
+
+#The next piece of code uses the ENSEMBL mart, querying with Ensembl gene id and requesting
+#the entrez gene id and HGNC gene symbol
+#Also note: with gencode, i get the ensembl gene id version, so i have to update my biomart info to make sure im 
+#getting all the additional info. 
+
+#Need to use old mart version 102, otherwise my data wont match.
+ensembl102 <- useEnsembl(biomart = 'genes', 
+                         dataset = 'mmusculus_gene_ensembl',
+                         version = 102)
+# Result 1:
+genemap1 <- getBM(attributes = c('ensembl_gene_id_version', 'ensembl_gene_id', 'external_gene_name', 'chromosome_name', 'start_position', 'end_position', 'transcription_start_site', 'strand', 'description'), 
+                  filters = 'ensembl_gene_id_version', 
+                  values = res_1$ensembl_version, 
+                  mart = ensembl102)
+
+id_match1 <- match(res_1$ensembl_version, genemap1$ensembl_gene_id_version)
+
+res_1$ensembl_id <- genemap1$ensembl_gene_id [id_match1]
+res_1$gene_name <- genemap1$external_gene_name [id_match1]
+res_1$chr <- genemap1$chromosome_name [id_match1]
+res_1$start_position <- genemap1$start_position [id_match1]
+res_1$end_position <- genemap1$end_position [id_match1]
+res_1$tss <- genemap1$transcription_start_site [id_match1]
+res_1$strand <- genemap1$strand [id_match1]
+res_1$gene_des <- genemap1$description [id_match1]
+
+
+head(res_1,4)
+
+#Exporting results to CSV files
+write.csv(as.data.frame(res_1),
+          file="results/condition_MSMP_vs_SNMP.csv")
+
+#DONE
