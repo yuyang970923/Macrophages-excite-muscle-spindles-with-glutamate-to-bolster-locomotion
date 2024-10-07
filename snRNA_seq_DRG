@@ -1,0 +1,360 @@
+# Load libraries
+library(Seurat)
+library(DoubletFinder)
+library(hdf5r)
+
+# read 10X data for each sample (here the example is DRG_C1_S1)
+DRG_Control1 <- Read10X(data.dir = "data/run_cellranger_count/run_count_DRG_C1_S1/filtered_feature_bc_matrix")
+
+# Turn count matrix into a Seurat object (output is a Seurat object)
+DRG_Control1.obj <- CreateSeuratObject(counts = DRG_Control1, min.features = 100, project = "DRG_Control1")
+
+# Check that the merged object has the appropriate sample-specific prefixes
+head(DRG_Control1.obj@meta.data)
+tail(DRG_Control1.obj@meta.data)
+
+# Add number of genes per UMI for each cell to metadata
+DRG_Control1.obj$log10GenesPerUMI <- log10(DRG_Control1.obj$nFeature_RNA) / log10(DRG_Control1.obj$nCount_RNA)
+
+# Compute percent mito 
+DRG_Control1.obj$percent_mt <- PercentageFeatureSet(object = DRG_Control1.obj, pattern = "^mt-")
+
+# Compute percent ribo 
+DRG_Control1.obj$percent_ribo <- PercentageFeatureSet(object = DRG_Control1.obj, pattern = "^Rp[sl]")
+
+# Create metadata dataframe
+metadata <- DRG_Control1.obj@meta.data
+
+# Add metadata back to Seurat object
+DRG_Control1.obj@meta.data <- metadata
+
+# Explore merged metadata
+View(DRG_Control1.obj@meta.data)
+dim(DRG_Control1.obj)
+table(DRG_Control1.obj$orig.ident)
+
+# Export merged_seurat as CSV file
+write.csv(DRG_Control1.obj@meta.data,"results/DRG_Control1.obj.csv")
+
+# Create .RData object to load at any time
+save(DRG_Control1.obj, file="data/DRG_Control1.obj.RData")
+
+# Filter out low quality reads using selected thresholds
+filtered_seurat_DRG_Control1 <- subset(x = DRG_Control1.obj, 
+                                        subset= (nCount_RNA >= 500) & 
+                                          (nFeature_RNA >= 250) & 
+                                          (percent_mt < 15))
+# Extract counts
+counts <- GetAssayData(object = filtered_seurat_DRG_Control1, slot = "counts")
+
+# Output a logical vector for every gene on whether the more than zero counts per cell
+nonzero <- counts > 0
+
+# Sums all TRUE values and returns TRUE if more than 10 TRUE values per gene
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+
+# Only keeping those genes expressed in more than 10 cells
+filtered_counts <- counts[keep_genes,]
+
+# Reassign to filtered Seurat object
+filtered_seurat_DRG_Control1 <- CreateSeuratObject(filtered_counts, meta.data = filtered_seurat_DRG_Control1@meta.data)
+
+# Export merged_seurat as excel file
+write.csv(filtered_seurat_DRG_Control1@meta.data,"results/filtered_seurat_DRG_Control1.csv")
+
+# Create .RData object to load at any time
+save(filtered_seurat_DRG_Control1, file="data/filtered_seurat_DRG_Control1.RData")
+View(filtered_seurat_DRG_Control1@meta.data)
+dim(filtered_seurat_DRG_Control1)
+table(filtered_seurat_DRG_Control1$orig.ident)
+#DRG_Control1 
+
+#doublet removal(SCTransform)
+
+# load filtered seurat
+load("data/filtered_seurat_DRG_Control1.RData")
+
+# run PCA and UMAP
+filtered_seurat_DRG_Control1 <- RunPCA(filtered_seurat_DRG_Control1)
+filtered_seurat_DRG_Control1 <- RunUMAP(filtered_seurat_DRG_Control1, dims = 1:10, verbose = FALSE, umap.method = "umap-learn", metric = "correlation")
+
+# define the expected number of doublet cells.
+nExp <- round(ncol(filtered_seurat_DRG_Control1) * 0.075)  # expect 7.5% doublets
+filtered_seurat_DRG_Control1 <- doubletFinder_v3(filtered_seurat_DRG_Control1, pN = 0.25, pK = 0.09, nExp = nExp, PCs = 1:10, sct = TRUE)
+
+# name of the DF prediction can change, so extract the correct column name.
+DF.name = colnames(filtered_seurat_DRG_Control1@meta.data)[grepl("DF.classification", colnames(filtered_seurat_DRG_Control1@meta.data))]
+cowplot::plot_grid(ncol = 2, DimPlot(filtered_seurat_DRG_Control1, group.by = "orig.ident") + NoAxes(), DimPlot(filtered_seurat_DRG_Control1, group.by = DF.name) + NoAxes())
+VlnPlot(filtered_seurat_DRG_Control1, features = "nFeature_RNA", group.by = DF.name, pt.size = 0.1)
+DimPlot(filtered_seurat_DRG_Control1, group.by = DF.name)
+
+# Export filtered_seurat_dr as Excel file
+write.csv(filtered_seurat_DRG_Control1@meta.data,"results/filtered_seurat_DRG_Control1+doublets.csv")
+
+#removal doublet
+filtered_seurat_DRG_Control1_dr = filtered_seurat_DRG_Control1[, filtered_seurat_DRG_Control1@meta.data[, DF.name] == "Singlet"]
+dim(filtered_seurat_DRG_Control1_dr)
+table(filtered_seurat_DRG_Control1_dr$orig.ident)
+View(filtered_seurat_DRG_Control1_dr@meta.data)
+
+# Export filtered_seurat_dr as Excel file
+write.csv(filtered_seurat_DRG_Control1_dr@meta.data,"results/filtered_seurat_DRG_Control1_dr.csv")
+
+# save RDS
+saveRDS(filtered_seurat_DRG_Control1_dr, file = "data/filtered_seurat_DRG_Control1_dr.RData")
+
+################################
+# Single-cell RNA-seq analysis - clustering analysis
+# Load libraries
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+
+# Turn count matrix into a Seurat object (output is a Seurat object)
+C1_S1_dr <- readRDS("data/filtered_seurat_DRG_Control1_dr.RData")
+C2_S2_dr <- readRDS("data/filtered_seurat_DRG_Control2_dr.RData")
+C3_S3_dr <- readRDS("data/filtered_seurat_DRG_Control3_dr.RData")
+D1_S4_dr <- readRDS("data/filtered_seurat_DRG_Depletion1_dr.RData")
+D2_S5_dr <- readRDS("data/filtered_seurat_DRG_Depletion2_dr.RData")
+D3_S6_dr <- readRDS("data/filtered_seurat_DRG_Depletion3_dr.RData")
+
+# Create a merged Seurat object
+merged_seurat_dr <- merge(x = C1_S1_dr, 
+                                      y = c(C2_S2_dr, C3_S3_dr, D1_S4_dr, D2_S5_dr, D3_S6_dr), merge.data = FALSE,
+                                      add.cell.id = c("C1_S1", "C2_S2", "C3_S3", "D1_S4", "D2_S5", "D3_S6"))
+
+GetAssayData(merged_seurat_dr)[1:20,1:20]
+
+View(merged_seurat_dr@meta.data)
+
+#Create metadata dataframe
+metadata <- merged_seurat_dr@meta.data
+
+#Add cell IDs to metadata
+metadata$cells <- rownames(metadata)
+
+# Create sample column
+metadata$sample <- NA
+metadata$sample[which(str_detect(metadata$cells, "^C1_S1_"))] <- "C1_S1"
+metadata$sample[which(str_detect(metadata$cells, "^C2_S2_"))] <- "C2_S2"
+metadata$sample[which(str_detect(metadata$cells, "^C3_S3_"))] <- "C3_S3"
+metadata$sample[which(str_detect(metadata$cells, "^D1_S4_"))] <- "D1_S4"
+metadata$sample[which(str_detect(metadata$cells, "^D2_S5_"))] <- "D2_S5"
+metadata$sample[which(str_detect(metadata$cells, "^D3_S6_"))] <- "D3_S6"
+
+# Create condition column
+metadata$condition <- NA
+metadata$condition[which(str_detect(metadata$cells, "^C1_S1_"))] <- "Control"
+metadata$condition[which(str_detect(metadata$cells, "^C2_S2_"))] <- "Control"
+metadata$condition[which(str_detect(metadata$cells, "^C3_S3_"))] <- "Control"
+metadata$condition[which(str_detect(metadata$cells, "^D1_S4_"))] <- "Depletion"
+metadata$condition[which(str_detect(metadata$cells, "^D2_S5_"))] <- "Depletion"
+metadata$condition[which(str_detect(metadata$cells, "^D3_S6_"))] <- "Depletion"
+
+# Add metadata back to Seurat object
+merged_seurat_dr@meta.data <- metadata
+
+# Explore merged metadata
+View(merged_seurat_dr@meta.data)
+
+# Check that the merged object has the appropriate sample-specific prefixes
+head(merged_seurat_dr@meta.data)
+tail(merged_seurat_dr@meta.data) 
+
+# Explore merged metadata
+View(merged_seurat_dr@meta.data)
+write.csv(merged_seurat_dr@meta.data,"results/merged_seurat_dr.csv")
+saveRDS(merged_seurat_dr, file="data/merged_seurat_dr.RData")
+
+#load merged_seurat_dr
+merged_seurat_dr <- readRDS("data/merged_seurat_dr.RData")
+
+library(Seurat)
+library(SeuratData)
+library(patchwork)
+
+# load dataset
+#load merged_seurat_dr
+merged_seurat_dr <- readRDS("data/merged_seurat_dr.RData")
+
+# split the dataset into a list of two seurat objects (stim and CTRL)
+merged_seurat_dr.list <- SplitObject(merged_seurat_dr, split.by = "sample")
+
+# normalize and identify variable features for each dataset independently
+merged_seurat_dr.list <- lapply(X = merged_seurat_dr.list, FUN = function(x) {
+  x <- SCTransform(x)
+  x <- FindVariableFeatures(x, nfeatures = 3000)
+})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = merged_seurat_dr.list)
+merged_seurat_dr.list <- PrepSCTIntegration(object.list = merged_seurat_dr.list, anchor.features = features)
+
+#We then identify anchors using the FindIntegrationAnchors() function, which takes a list of Seurat objects as input, and use these anchors to integrate the two datasets together with IntegrateData().
+merged_seurat_dr.list.anchors <- FindIntegrationAnchors(object.list = merged_seurat_dr.list, normalization.method = "SCT",
+                                                                    anchor.features = features)
+
+# this command creates an 'integrated' data assay
+merged_seurat_dr.list.combined <- IntegrateData(anchorset = merged_seurat_dr.list.anchors, normalization.method = "SCT")
+saveRDS(merged_seurat_dr.list.combined, file="data/merged_seurat_dr.list.combined.RData")
+
+###################################################
+# specify that we will perform downstream analysis on the corrected data note that the
+seurat_integrated <- readRDS("data/merged_seurat_dr.list.combined.RData")
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(seurat_integrated) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+seurat_integrated <- RunPCA(seurat_integrated, npcs = 40, verbose = FALSE)
+seurat_integrated <- RunUMAP(seurat_integrated, reduction = "pca", dims = 1:40)
+seurat_integrated <- FindNeighbors(seurat_integrated, reduction = "pca", dims = 1:40)
+seurat_integrated <- FindClusters(seurat_integrated, resolution = c(0.1,0.2,0.3,0.4,0.5) )
+
+#OR directly run a specific resolution #resolution = n
+seurat_integrated <- FindClusters(seurat_integrated, resolution = 0.2)
+
+#save RDS
+saveRDS(seurat_integrated, file="data/seurat_integrated_resolution0.2.RData")
+
+#Load RDS
+# Explore resolutions
+seurat_integrated %>% 
+  View()
+# Assign identity of clusters
+Idents(object = seurat_integrated) <- "integrated_snn_res.0.2"
+
+# Plot the UMAP
+DimPlot(seurat_integrated,
+        reduction = "umap",
+        label = TRUE,
+        label.size = 6)
+#
+DimPlot(object = seurat_integrated, 
+        reduction = "umap", 
+        label = TRUE) + NoLegend()
+
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(seurat_integrated, 
+                     vars = c("ident", "orig.ident")) %>%
+  dplyr::count(ident, orig.ident) %>%
+  tidyr::spread(ident, n)
+
+# View table
+View(n_cells)
+write.csv(n_cells,"results/n_cells_resolution0.2.csv")
+
+###################################################
+# Single-cell RNA-seq analysis - clustering analysis
+
+# Load libraries
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+
+# For performing differential expression after integration, we switch back to the original
+# For performing differential expression after integration, we switch back to the original
+seurat_integrated <- readRDS("data/seurat_integrated_resolution0.2.RData")
+
+# data
+DefaultAssay(seurat_integrated) <- "RNA"
+
+#Normalize data
+seurat_integrated <- NormalizeData(seurat_integrated)
+
+#Adding gene annotations
+annotations <- read.csv("data/annotation_mus.csv")
+
+### FindAllMarkergene
+# Create function to get all markers for any given cluster
+get_all_marker_res0.2 <- function(cluster){
+  FindMarkers(seurat_integrated,
+              ident.1 = cluster,
+              only.pos = TRUE,
+              logfc.threshold = 0.25) %>%
+    rownames_to_column(var = "gene") %>%
+    left_join(y = unique(annotations[, c("gene_name", "description")]),
+              by = c("gene" = "gene_name")) %>%
+    cbind(cluster_id = cluster, .)
+}
+
+# Iterate function across desired clusters
+get_all_marker_res0.2 <- map_dfr(c(0:15), get_all_marker_res0.2)
+
+#view all_markers
+View(get_all_marker_res0.2)
+
+# Export all_annotation_markers as CSV file
+write.csv(get_all_marker_res0.2,"results/get_all_marker_res0.2_LFC0.25.csv")
+
+# Rename all identities
+seurat_integrated <- RenameIdents(object = seurat_integrated, 
+                                  "0" = "C0",
+                                  "1" = "C1",
+                                  "2" = "C2",
+                                  "3" = "C3",
+                                  "4" = "C4",
+                                  "5" = "C5",
+                                  "6" = "C6",
+                                  "7" = "C7",
+                                  "8" = "C8",
+                                  "9" = "C9",
+                                  "10" = "C10",
+                                  "11" = "C11",
+                                  "12" = "C12")
+
+# Plot the UMAP
+DimPlot(object = seurat_integrated, 
+        reduction = "umap", 
+        label = TRUE,
+        label.size = 3,
+        repel = TRUE)
+
+# add cell type condition and cell type columns 
+seurat_integrated$celltype.condition <- paste(Idents(seurat_integrated), seurat_integrated$condition, sep = "_")
+seurat_integrated$celltype <- Idents(seurat_integrated)
+
+# Save final R object
+saveRDS(seurat_integrated, file="data/seurat_integrated_res0.2.RData")
+
+################################
+
+# Load libraries
+library(Seurat)
+library(tidyverse)
+library(MAST)
+library(patchwork)
+
+# Dimensionality reduction
+
+# load integrated seurat
+seurat_integrated_res0.2 <- readRDS("data/seurat_integrated_res0.2.RData")
+
+# data
+DefaultAssay(seurat_integrated_res0.2) <- "RNA"
+
+#Normalize data
+seurat_integrated_unlabelled_res0.2 <- NormalizeData(seurat_integrated_res0.2)
+Idents(seurat_integrated_res0.2) <- "celltype.condition"
+View(seurat_integrated_res0.2@meta.data)
+
+######################################################
+#DE genes for each cluster (for example- Cluster 0 = C0)
+DE.C0.Depletion.response_res0.2 <- FindMarkers(seurat_integrated_unlabelled_res0.2, ident.1 = "C0_Depletion", ident.2 = "C0_Control",min.pct=0.25, logfc.threshold=0.25, test.use = "MAST", verbose = FALSE)
+head(DE.C0.Depletion.response_res0.2, n = 15)
+
+# Adding Gene Annotations
+annotations <- read.csv("data/annotations_mus.csv")
+
+# Combine differential expressed genes with gene descriptions 
+DE.C0.Depletion.response_res0.2 <- DE.C0.Depletion.response_res0.2 %>% 
+  rownames_to_column(var="gene") %>% 
+  left_join(y = unique(annotations[, c("gene_id", "gene_name", "description")]),
+            by = c("gene" = "gene_name"))
+view(DE.C0.Depletion.response_res0.2)
+write.csv(DE.C0.Depletion.response_res0.2, file="results/DE_res_0.2/L2FC0.25/DE.C0.Depletion.response_res0.2.csv")
+
+
