@@ -1,3 +1,5 @@
+This script is used to analyse single nucleus RNA sequencing datasets.
+
 # Load libraries
 library(Seurat)
 library(DoubletFinder)
