@@ -1,3 +1,4 @@
+This script is used to analyse bulk RNA sequencing datasets (to generate normalised counts and perform DE analysis).
 
 #####
 #Start: loading required packages
@@ -56,8 +57,7 @@ coldata$condition <- cond$Condition [match_conditions]
 coldata
 
 
-#Running Tximeta - you need to use to above code, for some reason if i just run the Tximeta on its own,
-#it wont link correctly 
+#Running Tximeta 
 se <- tximeta(coldata)
 suppressPackageStartupMessages(library(SummarizedExperiment))
 colData(se)
